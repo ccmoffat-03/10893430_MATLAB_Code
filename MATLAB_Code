@@ -1,0 +1,594 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% MRR Simulation
+%
+% Author: Cameron Moffat
+% EEEN30330 Individual 3rd Year Project
+% Institution: University of Manchester
+% Date: 01/05/2026
+%
+% ------------------------------------------------------------------------
+% DESCRIPTION
+% ------------------------------------------------------------------------
+% The model consists of:
+%   - Multi-frequency THz-driven EO phase modulation
+%   - Optical sideband generation around a 1550 nm carrier
+%   - Wavelength-dependent microring resonator response
+%   - Coupling-gap dependent transmission characteristics
+%   - Thermal tuning of resonance conditions
+%   - Constraint-based selection of feasible resonator designs
+%
+% ------------------------------------------------------------------------
+% OUTPUTS
+% ------------------------------------------------------------------------
+% The simulation generates:
+%   - EO sidebands
+%   - Through-port and drop-port transmission spectra
+%   - Coupling gap against wavelength (heatmap)
+%   - Thermal resonance shift analysis
+%   - Sideband-localised spectral windows
+%   - Final optimised device selection table
+%
+% ------------------------------------------------------------------------
+% USAGE
+% ------------------------------------------------------------------------
+% Run the full simulation by executing:
+%       main
+% No external dependencies are required.
+%
+% ------------------------------------------------------------------------
+% NOTES
+% ------------------------------------------------------------------------
+% Check the README file for notes on paramater adjustments
+%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+clear; close all; clc;
+%EO mod params
+lambdaT = 1550e-9;
+c = 299792458;
+f0 = c/lambdaT;          % optical freq ~193.4 THz
+fs = 7e12;              % sample rate for envelope (Hz)
+T = 1e-9;               % total time window (s)
+t = (0:1/fs:T-1/fs).';
+P0 = 1;                  % optical power (normalized)
+A0 = sqrt(P0);
+
+% DEFINE SIDEBANDS HERE-----------------------------------------------------------------------------------------------------------
+freqs = [ 0.050, 4.000, 2.100, 1.150, 3.050, 0.500, 3.450, 1.700, 2.400, 0.800, 3.75]*1e12;  % THz 
+amps  = [1, 1, 1, 1,1,1,1,1,1,1,1,1,1,1,1,1];           % relative amplitudes (V/Vpi) //just keep at 1
+Vpi = 5;
+
+% phase modulate sidebands
+phi = zeros(size(t));
+for k = 1:numel(freqs)
+    phi = phi + pi*(amps(k)/Vpi)*sin(2*pi*freqs(k)*t);
+end
+
+% Complex optical envelope
+A = A0 .* exp(1j*phi);
+
+%MRR Params
+lambda0 = 1.550e-6;          
+lambda = linspace(1.55e-6,1.6e-6,75000);
+
+W = 50e-9;                 
+H = 10*W;                  
+n_core = 3.48;             
+n_clad = 1.44;             
+
+n_eff0 = 2.4;              
+dn_dlambda = -0.02e6;      
+
+% SET RING RADIUS HERE----------------------------------------------------
+R = 39.21e-6;            
+
+L = 2*pi*R;                
+alpha_dB_per_cm = 5;        
+alpha_dB_per_m = alpha_dB_per_cm*100; 
+a = 10.^(-alpha_dB_per_m * L / 20);   
+
+% Coupling params
+gamma = 80e-9;             % evanescent decay length
+k0 = 0.3;                  % maximum coupling coefficient at zero gap
+
+% GAP PARAMS SET HERE------------------------------------------------------
+gap_single = 47e-9;      %47 is critical
+k_single = k0 * exp(-gap_single/gamma);
+if k_single > 0.999, k_single = 0.999; end
+t_coup_single = sqrt(1 - k_single^2);
+
+%Sweep gap for plots
+gap = linspace(0e-9,300e-9,1000);  
+k = k0 * exp(-gap/gamma);
+k(k>0.999)=0.999;
+t_coup = sqrt(1 - k.^2);
+
+%THERMAL TUNING PARAMS SET HERE
+dn_dT = 1.86e-4;     
+DeltaT = 0.9;    %Tune here    ---------------------------------------  
+n_eff0_therm = n_eff0 + dn_dT * DeltaT;
+
+%Wavelength-dependant neff and phase
+n_eff = n_eff0_therm + dn_dlambda.*(lambda - lambda0);
+beta = 2*pi.*n_eff ./ lambda;
+phi_ring = beta * L;
+
+%generate spectra
+E_through_single = (t_coup_single - a .* exp(-1j*phi_ring)) ./ (1 - a.*t_coup_single .* exp(-1j*phi_ring));
+T_through_single = abs(E_through_single).^2;
+
+E_drop_single = -1j .* k_single .* sqrt(a) .* exp(-1j*phi_ring/2) ./ (1 - a.*t_coup_single .* exp(-1j*phi_ring));
+T_drop_single = abs(E_drop_single).^2;
+T_drop_norm_single = T_drop_single / max(T_drop_single);
+
+
+%sweep temp for linearity check
+DeltaT_sweep = linspace(0, 30, 200);  
+lambda_res_sweep = zeros(size(DeltaT_sweep)); %store
+
+% Fix mode number at start condit
+m0 = round(n_eff0 * L / lambda0);
+
+for i = 1:length(DeltaT_sweep)
+    
+    % Effective index vs temperature
+    n_eff_T = n_eff0 + dn_dT * DeltaT_sweep(i);
+    
+    % Keep same l.mode
+    lambda_res_sweep(i) = n_eff_T * L / m0;  %store
+end
+
+%plot
+figure('Name','Resonant wavelength vs Temperature','NumberTitle','off');
+
+plot(DeltaT_sweep, lambda_res_sweep*1e9, 'LineWidth',2); % convert to nm
+xlabel('Temperature Change ΔT (°C)');
+ylabel('Resonant Wavelength (nm)');
+title('MRR Resonance Shift with Temperature');
+grid on;
+
+
+
+
+
+
+% peak detection and window width%%%%%
+% all local maxima
+[pks, locs] = findpeaks(T_drop_single);
+
+% get strongest peak
+[~, idx_strongest] = max(pks);
+idx_peak = locs(idx_strongest);
+
+% local minima
+local_min = islocalmin(T_drop_single);
+
+% closest minima to the left of peak
+idx_left_candidates = find(local_min & (1:length(T_drop_single)) < idx_peak);
+if ~isempty(idx_left_candidates)
+    idx_left = idx_left_candidates(end);
+else
+    idx_left = 1; 
+end
+
+% closest minima to the right of peak
+idx_right_candidates = find(local_min & (1:length(T_drop_single)) > idx_peak);
+if ~isempty(idx_right_candidates)
+    idx_right = idx_right_candidates(1);
+else
+    idx_right = length(T_drop_single); 
+end
+
+% Convert indices to wavelength
+lambda_left  = lambda(idx_left);
+lambda_right = lambda(idx_right);
+
+% Compute peak width and half-width
+peak_width  = lambda_right - lambda_left;
+window_span = peak_width / 2;             
+
+%mode field
+x = linspace(-1.5e-6,1.5e-6,1000);  
+mode_core_half = W/2;
+mode_sigma = 0.45*W;        
+evanescent_decay = 80e-9;  
+
+core_mask = abs(x) <= mode_core_half;
+E = zeros(size(x));
+E(core_mask) = exp(-(x(core_mask).^2)/(2*mode_sigma^2));
+
+right_mask = x > mode_core_half;
+E_right_at_edge = exp(-(mode_core_half^2)/(2*mode_sigma^2));
+x_right = x(right_mask) - mode_core_half;
+E(right_mask) = E_right_at_edge * exp(-x_right/evanescent_decay);
+
+left_mask = x < -mode_core_half;
+E_left_at_edge = exp(-(mode_core_half^2)/(2*mode_sigma^2));
+x_left = -x(left_mask) - mode_core_half;
+E(left_mask) = E_left_at_edge * exp(-x_left/evanescent_decay);
+
+E = E / max(abs(E));
+
+%MRR transmission plots, credit to I.Crowe for the demonstration of how to
+%create these plots in the initial stages of the project
+
+figure('Name','MRR port transmission','NumberTitle','off');
+subplot(2,1,1);
+plot(x*1e9, abs(E).^2, 'LineWidth', 1.4);
+xlabel('x (nm)'); ylabel('Intensity (a.u.)');
+title('Approximate guided mode intensity + evanescent tail (1D cross-section)');
+grid on;
+xlim([-500 500]);
+
+subplot(2,1,2);
+plot(lambda*1e9, T_through_single, 'LineWidth', 1.4);
+xlabel('Wavelength (nm)'); ylabel('Through-port Power Transmission');
+title('Microring Through-Port Transmission Spectrum');
+grid on;
+hold on;
+plot(lambda*1e9, T_drop_single, 'LineWidth',1);
+legend('Through','Drop (modelled)');
+
+%Heatmap for coupling
+% wide window around peak
+lambda_window = 2e-9;  % plus-minus 1 nm around peak
+lambda_min_hm = lambda(idx_peak) - lambda_window/2;
+lambda_max_hm = lambda(idx_peak) + lambda_window/2;
+lambda_hm = lambda(lambda >= lambda_min_hm & lambda <= lambda_max_hm);
+
+% sweep gap to capture over/under coupling
+gap_hm = linspace(0e-9, 300e-9, 400);
+k_hm = k0 * exp(-gap_hm/gamma);
+k_hm(k_hm > 0.999) = 0.999;
+t_coup_hm = sqrt(1 - k_hm.^2);
+
+% drop port field map
+E_ring_map = zeros(length(gap_hm), length(lambda_hm));
+for i = 1:length(gap_hm)
+    k_i = k_hm(i);
+    t_i = t_coup_hm(i);
+    E_ring_map(i,:) = 1j .* k_i ./ (1 - a .* t_i .* exp(-1j*phi_ring(lambda >= lambda_min_hm & lambda <= lambda_max_hm)));
+end
+
+% normalise intensity
+E_ring_map_norm = abs(E_ring_map).^2;
+E_ring_map_norm = E_ring_map_norm / max(E_ring_map_norm(:));
+
+% Locate max heat
+[max_val, linear_idx] = max(E_ring_map_norm(:));
+[idx_gap_max, idx_lambda_max] = ind2sub(size(E_ring_map_norm), linear_idx);
+
+% corresponding wavelength and gap
+lambda_max_hm = lambda_hm(idx_lambda_max);
+gap_max_hm    = gap_hm(idx_gap_max);
+
+% Plot heatmap
+figure('Name','Drop-Port Heatmap','NumberTitle','off');
+imagesc(lambda_hm*1e9, gap_hm*1e9, E_ring_map_norm);
+set(gca, 'YDir','normal');
+xlabel('Wavelength (nm)');
+ylabel('Gap (nm)');
+title('Drop-Port Intensity vs Wavelength & Gap');
+colorbar; colormap jet; grid on;
+hold on;
+
+% mark wavelength
+[~, idx_lambda_peak] = min(abs(lambda_hm - lambda(idx_peak)));
+plot(lambda_hm(idx_lambda_peak)*1e9 * ones(size(gap_hm)), gap_hm*1e9, 'r--', 'LineWidth', 1.5);
+text(lambda_hm(idx_lambda_peak)*1e9, min(gap_hm)*1e9, sprintf('λ = %.3f nm', lambda_hm(idx_lambda_peak)*1e9), ...
+    'Color','r','FontWeight','bold','VerticalAlignment','bottom');
+
+% mark crit couple
+plot(lambda_max_hm*1e9, gap_max_hm*1e9, 'go', 'MarkerSize', 10, 'LineWidth', 2);
+text(lambda_max_hm*1e9, gap_max_hm*1e9, ' Critical Coupling', 'Color','g','FontWeight','bold', ...
+    'HorizontalAlignment','left','VerticalAlignment','bottom');
+
+
+% vertical slice of heatmap
+vertical_slice = E_ring_map_norm(:, idx_lambda_peak);
+
+figure('Name','Coupling Vertical Slice','NumberTitle','off');
+plot(gap_hm*1e9, vertical_slice, 'LineWidth', 2);
+xlabel('Gap (nm)');
+ylabel('Normalized Drop Intensity');
+title(sprintf('Vertical Slice at λ = %.3f nm', lambda_hm(idx_lambda_peak)*1e9));
+grid on;
+hold on;
+
+% Mark critical coupling point
+plot(gap_max_hm*1e9, vertical_slice(idx_gap_max), 'ro', ...
+    'MarkerSize',8,'LineWidth',2);
+text(gap_max_hm*1e9, vertical_slice(idx_gap_max), ...
+    '  Critical Coupling','Color','r','FontWeight','bold');
+
+
+%EO Windows for SB plots
+figure('Name','EO Sideband Local Windows','NumberTitle','off');
+
+n_sidebands = numel(freqs); %pulls columns from array
+rows = 4; 
+cols = ceil(n_sidebands/rows);
+
+for k = 1:n_sidebands
+    
+    % Compute sideband wavelength
+    f_sb = f0 - freqs(k);
+    lambda_sb = c / f_sb;
+    
+    % Define local window
+    lambda_min = lambda_sb - window_span;
+    lambda_max = lambda_sb + window_span;
+    
+    % Select points within window
+    local_mask = (lambda >= lambda_min) & (lambda <= lambda_max);
+    lambda_local = lambda(local_mask);
+    E_local = T_drop_single(local_mask);  % magnitude only
+    
+    % if too few points (DO NOT REMOVE, CRASHES)
+    if numel(lambda_local) < 2
+        lambda_local = linspace(lambda_min, lambda_max, 5);
+        E_local = interp1(lambda, T_drop_single, lambda_local, 'linear', 'extrap');
+    end
+    
+    % Interpolate at sideband
+    H_sb = interp1(lambda_local, E_local, lambda_sb, 'spline');
+    
+    % Plot in subplot
+    subplot(rows, cols, k);
+    plot(lambda_local*1e9, abs(E_local), 'b-', 'LineWidth', 1.5); hold on;
+    plot(lambda_sb*1e9, abs(H_sb), 'ro', 'MarkerSize', 6, 'LineWidth', 2);
+    
+    xlabel('Wavelength (nm)');
+    ylabel('|T_{drop}|');
+    title(sprintf('Sideband %.3f THz (λ = %.4f nm)', freqs(k)/1e12, lambda_sb*1e9));
+    grid on;
+    
+   %mark sideband with vertical line
+    ylims = ylim;
+    plot([lambda_sb lambda_sb]*1e9, ylims, 'r--', 'LineWidth', 1);
+
+sgtitle('Drop-Port Local Windows Around Each EO Sideband');
+
+
+% MRR Viability check (pre-filter)
+% params
+c = 299792458;            % m/s
+lambdaT = 1550e-9;        % carrier wavelength
+f0 = c/lambdaT;
+n_eff0 = 2.4;
+dn_dlambda = -0.02e6;
+dn_dT = 1.86e-4;
+
+R_nom = 39.2e-6;          % nominal radius
+R_tol = 10e-9;            % fabrication tolerance
+DeltaT_step = 0.1;        % temp increments
+DeltaT_max = 30;          % maximum allowed dT
+
+% sideband candidates (THz)
+sideband_range = 0.05:0.025:4.0;  
+num_candidates = numel(sideband_range);
+
+
+% Arrays
+
+R_candidate = zeros(1,num_candidates);
+DeltaT_candidate = zeros(1,num_candidates);
+Lambda_candidate = zeros(1,num_candidates);
+Freq_candidate = zeros(1,num_candidates);
+FSR_candidate = zeros(1,num_candidates);
+Feasible_candidate = strings(1,num_candidates);
+
+
+% Compute candidates
+
+for k = 1:num_candidates
+    f_sb = sideband_range(k)*1e12; 
+    lambda_sb = c/(f0 - f_sb);      
+    n_eff_sb = n_eff0 + dn_dlambda*(lambda_sb - lambdaT);
+
+    % integer mode number
+    m = round(n_eff_sb*2*pi*R_nom/lambda_sb);
+    R_ideal = m*lambda_sb/(2*pi*n_eff_sb);
+
+    % round to fabrication tolerance
+    R_fab = round(R_ideal / R_tol) * R_tol;
+
+    % thermal tuning required
+    deltaT = (R_ideal - R_fab)/R_fab * (n_eff_sb / dn_dT);
+    DeltaT_resonance = round(deltaT/DeltaT_step) * DeltaT_step;
+
+    % store
+    R_candidate(k) = R_fab;
+    DeltaT_candidate(k) = DeltaT_resonance;
+    Lambda_candidate(k) = lambda_sb;
+    Freq_candidate(k) = f_sb;
+
+    % compute FSR
+    n_g = n_eff_sb - lambda_sb*dn_dlambda;
+    L_sb = 2*pi*R_fab;
+    FSR_candidate(k) = c / (n_g * L_sb);
+
+    % feasibility check
+    if (R_fab > 0) && (abs(DeltaT_resonance) <= DeltaT_max)
+        Feasible_candidate(k) = "Yes";
+    else
+        Feasible_candidate(k) = "No";
+    end
+end
+
+
+%Selection algorithm
+
+%params
+max_rings = 12;          % maximum number of rings to select
+DeltaT_step = 0.1;       % °C step for thermal tuning
+DeltaT_max = 30;         % maximum allowed ΔT
+linewidth_freq = 240e9;  % minimum frequency spacing (Hz) to avoid collisions
+DeltaT_spacing_sameR = 0.5;  % minimum temperature separation if radii are same (°C)
+lambda_tol = 5e-3;       % alignment tolerance (nm) for resonance
+
+%arrays
+num_candidates = numel(Freq_candidate);
+DeltaT_final = zeros(1,num_candidates);
+R_adjusted_final = R_candidate; 
+selected_idx = [];
+selected_resonances = [];
+
+%select
+feasible_idx = find(Feasible_candidate=="Yes");
+
+while length(selected_idx) < max_rings && ~isempty(feasible_idx)
+    max_min_spacing = -Inf;
+    candidate_pick = -1;
+    f_best_candidate = 0;
+    DeltaT_best_candidate = 0;
+
+    for idx = 1:length(feasible_idx)
+        i = feasible_idx(idx);
+        lambda_target = Lambda_candidate(i);
+        n_eff_sb = n_eff0 + dn_dlambda*(lambda_target - lambdaT);
+        R_fab = round(R_adjusted_final(i)/R_tol) * R_tol;
+        R_adjusted_final(i) = R_fab;
+
+        %align resonant peak with TO effect
+        DeltaT_sweep = 0:DeltaT_step:DeltaT_max;
+        lambda_res_candidates = zeros(size(DeltaT_sweep));
+        f_res_candidates = zeros(size(DeltaT_sweep));
+
+        for j = 1:length(DeltaT_sweep)
+            dT = DeltaT_sweep(j);
+            n_eff_T = n_eff_sb + dn_dT*dT;
+            m_cont = 2*pi*R_fab*n_eff_T / lambda_target;
+            m_int = round(m_cont);
+
+            lambda_res = 2*pi*R_fab*n_eff_T / m_int;
+            f_res = c / lambda_res;
+
+            lambda_res_candidates(j) = lambda_res;
+            f_res_candidates(j) = f_res;
+        end
+
+        % choose ΔT for closest resonance
+        [~, best_idx] = min(abs(lambda_res_candidates - lambda_target));
+        lambda_res_best = lambda_res_candidates(best_idx);
+        f_res_best = f_res_candidates(best_idx);
+        DeltaT_best = DeltaT_sweep(best_idx);
+
+        %check resonance alignment is good enough
+        if abs(lambda_res_best - lambda_target) > lambda_tol*1e-9
+            continue  % skip if too far off
+        end
+
+        %mutual exclusivity checks
+        collision = false;
+        for j = 1:length(selected_resonances)
+            f_sel = selected_resonances(j);
+            idx_sel = selected_idx(j);
+
+            % frequency spacing
+            if abs(f_res_best - f_sel) < linewidth_freq
+                collision = true; break;
+            end
+
+            % same radius, enforce ΔT spacing
+            if R_fab == R_adjusted_final(idx_sel)
+                if abs(DeltaT_best - DeltaT_final(idx_sel)) < DeltaT_spacing_sameR
+                    collision = true; break;
+                end
+            end
+        end
+
+        if ~collision
+            % compute min spacing to existing rings
+            if isempty(selected_resonances)
+                min_spacing = Inf;
+            else
+                min_spacing = min(abs(f_res_best - selected_resonances));
+            end
+
+            % pick candidate with largest min spacing
+            if min_spacing > max_min_spacing
+                max_min_spacing = min_spacing;
+                candidate_pick = i;
+                f_best_candidate = f_res_best;
+                DeltaT_best_candidate = DeltaT_best;
+            end
+        end
+    end
+
+    %stop if none feasible
+    if candidate_pick == -1
+        break;
+    end
+
+    
+    % accept ring
+    selected_idx(end+1) = candidate_pick;
+    selected_resonances(end+1) = f_best_candidate;
+    DeltaT_final(candidate_pick) = DeltaT_best_candidate;
+
+    % remove picked candidate from feasible list
+    feasible_idx(feasible_idx==candidate_pick) = [];
+end
+
+%Output Tables etc
+selected_sidebands_THz = Freq_candidate(selected_idx)/1e12;
+selected_radii_um = R_adjusted_final(selected_idx)*1e6;
+selected_DeltaT_C = DeltaT_final(selected_idx);
+lambda_res_nm = c./selected_resonances*1e9;
+f_res_THz = selected_resonances/1e12;
+
+
+%DEV CODE
+%fprintf('\n%% Selected sidebands (THz):\n');
+%fprintf('selected_sidebands_THz = [ %s ];\n', sprintf('%.3f, ', selected_sidebands_THz));
+
+%fprintf('\n%% Fabricated ring radii (µm):\n');
+%fprintf('selected_radii_um = [ %s ];\n', sprintf('%.4f, ', selected_radii_um));
+
+%fprintf('\n%% Optimized ΔT for each ring (°C):\n');
+%fprintf('selected_DeltaT_C = [ %s ];\n', sprintf('%.3f, ', selected_DeltaT_C));
+
+%fprintf('\n%% Shifted resonance wavelengths (nm):\n');
+%fprintf('lambda_res_nm = [ %s ];\n', sprintf('%.4f, ', lambda_res_nm));
+
+%fprintf('\n%% Shifted resonance frequencies (THz):\n');
+%fprintf('f_res_THz = [ %s ];\n', sprintf('%.3f, ', f_res_THz));
+%
+
+end
+
+ResultsTable = table( ...
+    selected_sidebands_THz(:), ...
+    selected_radii_um(:), ...
+    selected_DeltaT_C(:), ...
+    lambda_res_nm(:), ...
+    'VariableNames', { ...
+        'Sideband_THz', ...
+        'Radius_um', ...
+        'DeltaT_C', ...
+        'Lambda_nm'} ...
+);
+
+% Sort by sideband
+ResultsTable = sortrows(ResultsTable, 'Sideband_THz');
+
+disp(ResultsTable);
+ResultsDisplay = ResultsTable;
+ResultsDisplay.Sideband_THz = round(ResultsDisplay.Sideband_THz,3);
+ResultsDisplay.Radius_um    = round(ResultsDisplay.Radius_um,3);
+ResultsDisplay.DeltaT_C     = round(ResultsDisplay.DeltaT_C,2);
+ResultsDisplay.Lambda_nm    = round(ResultsDisplay.Lambda_nm,3);
+
+figure('Name','MRR Design Table','NumberTitle','off');
+
+uitable('Data', ResultsDisplay{:,:}, ...
+        'ColumnName', ResultsDisplay.Properties.VariableNames, ...
+        'Units','normalized', ...
+        'Position',[0 0 1 1]);
+
+
+
+
+
+
